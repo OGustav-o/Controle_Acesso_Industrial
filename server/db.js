@@ -2,42 +2,44 @@ import Database from 'better-sqlite3';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import fs from 'fs';
-import bcrypt from 'bcryptjs';  
+import bcrypt from 'bcryptjs';
 
+// Configuração de caminhos para garantir que o banco seja criado no local correto
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const dbPath = process.env.DATABASE_PATH || path.join(__dirname, '../data/app.db');
 
-// A instância singleton do banco de dados
+// Instância singleton do banco de dados para evitar múltiplas conexões
 let db = null;
 
+/**
+ * Função para obter a instância do banco de dados.
+ * Garante que a conexão e o diretório existam antes do uso.
+ */
 export function getDb() {
-  // 1. Se o 'db' (global) já foi criado, apenas o retorna
-  if (db) return db;
+  if (db) return db; // Retorna a instância se já estiver inicializada
 
-  // 2. Criar diretório de dados se não existir
+  // Cria o diretório 'data' caso ele não exista 
   const dataDir = path.dirname(dbPath);
   if (!fs.existsSync(dataDir)) {
     fs.mkdirSync(dataDir, { recursive: true });
   }
 
-  // 3. ATRIBUI a instância à variável 'db' GLOBAL.
-  //    (Sem 'const' ou 'let' na frente)
-  //    E usa o 'dbPath' correto.
+  // Inicializa a conexão com o SQLite usando better-sqlite3 
   db = new Database(dbPath);
   
-  // 4. (Síncrono)
+  // Ativa o suporte a chaves estrangeiras para manter a integridade dos dados 
   db.exec('PRAGMA foreign_keys = ON');
   
-  // 5. Retorna a instância criada
   return db;
 }
 
+/**
+ * Cria as tabelas necessárias no banco de dados caso elas não existam.
+ */
 export function initializeDatabase() {
-  // 1. (Síncrono) Pega a instância do banco
-  const database = getDb();
+  const database = getDb(); // Obtém a conexão inicializada 
 
-  // 2. (Síncrono) Executa a criação de tabelas
-  //    Removi o 'await'
+  // Executa o script de criação de tabelas 
   database.exec(`
     CREATE TABLE IF NOT EXISTS users (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -81,20 +83,6 @@ export function initializeDatabase() {
       updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
     );
 
-    CREATE TABLE IF NOT EXISTS user_cell_permissions (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      user_id INTEGER NOT NULL,
-      cell_id INTEGER NOT NULL,
-      allowed INTEGER DEFAULT 1,
-      start_time DATETIME,
-      end_time DATETIME,
-      created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-      updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-      FOREIGN KEY (user_id) REFERENCES users(id),
-      FOREIGN KEY (cell_id) REFERENCES cells(id),
-      UNIQUE(user_id, cell_id)
-    );
-
     CREATE TABLE IF NOT EXISTS access_events (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       user_id INTEGER NOT NULL,
@@ -122,100 +110,37 @@ export function initializeDatabase() {
       FOREIGN KEY (cell_id) REFERENCES cells(id)
     );
 
-    CREATE TABLE IF NOT EXISTS access_control_logs (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      user_id INTEGER,
-      cell_id INTEGER NOT NULL,
-      action TEXT NOT NULL CHECK(action IN ('unlock', 'lock', 'denied')),
-      reason TEXT,
-      plc_response TEXT,
-      timestamp DATETIME DEFAULT CURRENT_TIMESTAMP,
-      created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-      FOREIGN KEY (user_id) REFERENCES users(id),
-      FOREIGN KEY (cell_id) REFERENCES cells(id)
-    );
-
-    CREATE TABLE IF NOT EXISTS plc_command_queue (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      cell_id INTEGER NOT NULL,
-      user_id INTEGER,
-      command TEXT NOT NULL,
-      command_data TEXT,
-      status TEXT DEFAULT 'pending' CHECK(status IN ('pending', 'processing', 'success', 'failed')),
-      retry_count INTEGER DEFAULT 0,
-      max_retries INTEGER DEFAULT 3,
-      response TEXT,
-      error_message TEXT,
-      executed_at DATETIME,
-      created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-      updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-      FOREIGN KEY (cell_id) REFERENCES cells(id),
-      FOREIGN KEY (user_id) REFERENCES users(id)
-    );
-
-    CREATE TABLE IF NOT EXISTS cell_status (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      cell_id INTEGER UNIQUE NOT NULL,
-      door_open INTEGER DEFAULT 0,
-      door_locked INTEGER DEFAULT 1,
-      motion_detected INTEGER DEFAULT 0,
-      temperature INTEGER,
-      humidity INTEGER,
-      last_update DATETIME DEFAULT CURRENT_TIMESTAMP,
-      created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-      updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-      FOREIGN KEY (cell_id) REFERENCES cells(id)
-    );
-
     CREATE INDEX IF NOT EXISTS idx_access_events_user_id ON access_events(user_id);
-    CREATE INDEX IF NOT EXISTS idx_access_events_cell_id ON access_events(cell_id);
     CREATE INDEX IF NOT EXISTS idx_cell_presence_user_id ON cell_presence(user_id);
-    CREATE INDEX IF NOT EXISTS idx_cell_presence_cell_id ON cell_presence(cell_id);
-    CREATE INDEX IF NOT EXISTS idx_plc_command_queue_cell_id ON plc_command_queue(cell_id);
-    CREATE INDEX IF NOT EXISTS idx_plc_command_queue_status ON plc_command_queue(status);
   `);
 
-  console.log('✅ Banco de dados inicializado');
+  console.log('✅ Banco de dados e tabelas inicializados com sucesso');
 }
 
+/**
+ * Popula o banco com dados iniciais obrigatórios (Seed).
+ * Resolve o problema de referência ao garantir que o admin seja buscado após a conexão. 
+ */
 export function seedDatabase() {
-  // 1. (Síncrono)
-  const database = getDb();
+  const database = getDb(); // Garante que a conexão existe antes da consulta 
 
-  // 2. (Síncrono) .get() em vez de 'await database.get()'
+  // Verifica se o usuário administrador já existe 
   const adminUser = database.prepare('SELECT * FROM users WHERE username = ?').get('admin');
   
-if (!adminUser) {
-  // CRIA UMA HASH REAL PARA A SENHA "admin"
-  const salt = bcrypt.genSaltSync(10);
-  const hash = bcrypt.hashSync("admin", salt); // <--- A senha será "admin"
+  if (!adminUser) {
+    // Gera o hash da senha padrão "admin123" de forma segura 
+    const salt = bcrypt.genSaltSync(10);
+    const hash = bcrypt.hashSync("admin123", salt);
 
-  database.prepare(
-    'INSERT INTO users (username, email, password_hash, role) VALUES (?, ?, ?, ?)'
-  ).run(
-    'admin', 
-    'admin@localhost', 
-    hash, // <--- Usamos a variável hash aqui, e não aquele texto fixo
-    'admin'
-  );
-  console.log('✅ Usuário admin criado com senha: admin');
-}
-
-  // 4. (Síncrono)
-  const testCell = database.prepare('SELECT * FROM cells WHERE name = ?').get('Célula Teste');
-  
-  if (!testCell) {
-    // 5. (Síncrono)
+    // Insere o usuário administrador inicial 
     database.prepare(
-      'INSERT INTO cells (name, description, plc_address, plc_port, plc_database, plc_start_byte) VALUES (?, ?, ?, ?, ?, ?)'
+      'INSERT INTO users (username, email, password_hash, role) VALUES (?, ?, ?, ?)'
     ).run(
-      'Célula Teste', 
-      'Célula de teste para validação', 
-      '192.168.1.100', 
-      102, 
-      1, 
-      0
+      'admin', 
+      'admin@localhost', 
+      hash, 
+      'admin'
     );
-    console.log('✅ Célula de teste criada');
+    console.log('✅ Usuário administrador padrão criado (admin / admin123)');
   }
 }
