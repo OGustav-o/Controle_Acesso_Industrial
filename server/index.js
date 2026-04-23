@@ -6,6 +6,8 @@ import multer from 'multer';
 import { v4 as uuidv4 } from 'uuid';
 import bcrypt from 'bcryptjs';
 import dotenv from 'dotenv';
+import { execFile } from 'child_process';
+import path from 'path';
 
 // Importação das funções do banco de dados e autenticação
 import { getDb, initializeDatabase, seedDatabase } from './db.js';
@@ -236,6 +238,96 @@ app.delete('/api/intelbras-devices/:id', (req, res) => {
   } catch (error) {
     console.error('[Devices] Delete failed:', error);
     res.status(500).json({ error: 'Erro ao deletar dispositivo' });
+  }
+});
+
+// --- INTEGRAÇÃO COM CLP (BRIDGE) ---
+
+/**
+ * Função utilitária para invocar o script Python do CLP.
+ * @param {Object} cellConfig - Dados da célula provenientes da base de dados.
+ * @param {String} action - Ação a executar ('read' ou 'write').
+ * @param {Number|null} value - Valor a escrever (se action === 'write').
+ */
+function runPlcCommand(cellConfig, action, value = null) {
+  return new Promise((resolve, reject) => {
+    // Aponta para a localização do script na sua nova arquitetura
+    const scriptPath = path.join(__dirname, 'API', 'plc_bridge.py');
+    
+    // Constrói os parâmetros CLI baseados nos dados guardados na BD
+    const args = [
+      scriptPath,
+      '--ip', cellConfig.plc_address,
+      '--rack', cellConfig.plc_rack.toString(),
+      '--slot', cellConfig.plc_slot.toString(),
+      '--db', cellConfig.plc_database.toString(),
+      '--start', cellConfig.plc_start_byte.toString(),
+      '--action', action
+    ];
+
+    if (value !== null && action === 'write') {
+      args.push('--value', value.toString());
+    }
+
+    // Nota: Em alguns sistemas Windows, pode ser necessário alterar 'python' para 'python3' ou 'py'
+    execFile('python', args, (error, stdout, stderr) => {
+      if (error) {
+        console.error('[PLC Bridge] Erro de execução:', stderr || error.message);
+        return reject(stderr || error.message);
+      }
+
+      try {
+        const result = JSON.parse(stdout);
+        if (!result.success) {
+          reject(result.error);
+        } else {
+          resolve(result); // Sucesso! Retorna { success: true, value: X }
+        }
+      } catch (parseError) {
+        console.error('[PLC Bridge] Saída inválida do Python:', stdout);
+        reject('Erro ao interpretar a resposta do script Python (Formato JSON inválido).');
+      }
+    });
+  });
+}
+
+// Rota de Teste de Conexão com o CLP (Célula)
+app.post('/api/cells/:id/test', async (req, res) => {
+  try {
+    authenticateRequest(req); // Verifica se o utilizador tem sessão iniciada
+    const { id } = req.params;
+    
+    const db = getDb();
+    const cell = db.prepare('SELECT * FROM cells WHERE id = ?').get(id);
+    
+    if (!cell) {
+      return res.status(404).json({ error: 'Célula não encontrada na base de dados.' });
+    }
+
+    if (!cell.plc_database) {
+      return res.status(400).json({ error: 'O Data Block (DB) do CLP não está configurado nesta Célula.' });
+    }
+
+    // Aciona a ponte Python com a ação de leitura
+    const result = await runPlcCommand(cell, 'read');
+    
+    // Atualiza o estado da Célula para 'online' se a leitura for bem-sucedida
+    db.prepare('UPDATE cells SET plc_status = ?, last_plc_check = CURRENT_TIMESTAMP WHERE id = ?')
+      .run('online', id);
+
+    res.json({ 
+      success: true, 
+      message: 'Conexão com CLP bem-sucedida!', 
+      data: result 
+    });
+
+  } catch (error) {
+    // Em caso de erro (CLP desligado, cabo de rede desconectado, IP errado, etc.)
+    const db = getDb();
+    db.prepare('UPDATE cells SET plc_status = ?, last_plc_check = CURRENT_TIMESTAMP WHERE id = ?')
+      .run('error', req.params.id);
+
+    res.status(500).json({ error: error.toString() });
   }
 });
 
