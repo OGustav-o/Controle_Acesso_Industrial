@@ -278,18 +278,22 @@ async function handleAddCell(event) {
 
     const name = document.getElementById('cellName').value;
     const description = document.getElementById('cellDescription').value;
-    const plcAddress = document.getElementById('cellPlcAddress').value;
-    const plcPort = parseInt(document.getElementById('cellPlcPort').value);
+    const plc_address = document.getElementById('cellPlcAddress').value;
+    
+    // Novos campos do CLP
+    const plc_port = parseInt(document.getElementById('cellPlcPort').value) || 102;
+    const plc_rack = parseInt(document.getElementById('cellPlcRack').value) || 0;
+    const plc_slot = parseInt(document.getElementById('cellPlcSlot').value) || 1;
+    const plc_database = parseInt(document.getElementById('cellPlcDb').value);
+    const plc_start_byte = parseInt(document.getElementById('cellPlcStart').value) || 0;
 
     try {
-        const result = await ApiClient.post('/cells', {
-            name,
-            description,
-            plcAddress,
-            plcPort
+        await ApiClient.post('/cells', {
+            name, description, plc_address, plc_port, 
+            plc_rack, plc_slot, plc_database, plc_start_byte
         });
 
-        showAlert('✅ Célula criada com sucesso!', 'success');
+        showAlert('✅ Célula e CLP configurados!', 'success');
         hideModal('cellModal');
         document.getElementById('cellForm').reset();
         loadDashboardData();
@@ -304,20 +308,19 @@ async function handleAddDevice(event) {
 
     const name = document.getElementById('deviceName').value;
     const ipAddress = document.getElementById('deviceIp').value;
-    const port = parseInt(document.getElementById('devicePort').value);
+    const port = parseInt(document.getElementById('devicePort').value) || 80;
     const username = document.getElementById('deviceUsername').value;
     const password = document.getElementById('devicePassword').value;
+    
+    // Pega a célula selecionada
+    const cell_id = document.getElementById('deviceCellId').value;
 
     try {
-        const result = await ApiClient.post('/intelbras-devices', {
-            name,
-            ipAddress,
-            port,
-            username,
-            password
+        await ApiClient.post('/intelbras-devices', {
+            name, ipAddress, port, username, password, cell_id
         });
 
-        showAlert('✅ Dispositivo adicionado com sucesso!', 'success');
+        showAlert('✅ Dispositivo adicionado e vinculado à Célula!', 'success');
         hideModal('deviceModal');
         document.getElementById('deviceForm').reset();
         updateDevicesGrid();
@@ -377,6 +380,34 @@ async function testDevice(deviceId) {
     } catch (error) {
         showAlert('❌ ' + error.message, 'danger');
     }
+}
+// Função para popular o select de células no modal de dispositivos
+function populateCellSelect() {
+    const select = document.getElementById('deviceCellId');
+    if (!select) return;
+
+    // Limpa as opções atuais e deixa apenas a padrão
+    select.innerHTML = '<option value="">Selecione uma célula...</option>';
+
+    // Verifica se existem células carregadas no cache
+    if (cellsCache.length === 0) {
+        select.innerHTML = '<option value="">Nenhuma célula encontrada</option>';
+        return;
+    }
+
+    // Adiciona cada célula como uma opção
+    cellsCache.forEach(cell => {
+        const option = document.createElement('option');
+        option.value = cell.id;
+        option.textContent = `${cell.name} (IP: ${cell.plc_address})`;
+        select.appendChild(option);
+    });
+}
+
+// Exemplo de como abrir o modal carregando os dados
+function openAddDeviceModal() {
+    populateCellSelect(); // Carrega as células disponíveis antes de mostrar o modal
+    showModal('deviceModal');
 }
 
 // Funções placeholder para edição

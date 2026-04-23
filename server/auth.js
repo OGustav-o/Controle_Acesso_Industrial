@@ -4,12 +4,12 @@ import { getDb } from './db.js';
 
 const JWT_SECRET = process.env.JWT_SECRET || 'default-secret-key-change-in-production';
 
-export async function hashPassword(password) {
-  return bcrypt.hash(password, 10);
+export function hashPassword(password) {
+  return bcrypt.hashSync(password, 10);
 }
 
-export async function verifyPassword(password, hash) {
-  return bcrypt.compare(password, hash);
+export function verifyPassword(password, hash) {
+  return bcrypt.compareSync(password, hash);
 }
 
 export function createToken(user) {
@@ -34,13 +34,11 @@ export function verifyToken(token) {
 }
 
 export function extractTokenFromRequest(req) {
-  // Tentar obter do header Authorization
   const authHeader = req.headers.authorization;
   if (authHeader && authHeader.startsWith('Bearer ')) {
     return authHeader.substring(7);
   }
 
-  // Tentar obter do cookie
   const cookies = req.headers.cookie;
   if (cookies) {
     const tokenCookie = cookies.split(';').find(c => c.trim().startsWith('token='));
@@ -52,16 +50,22 @@ export function extractTokenFromRequest(req) {
   return null;
 }
 
-export async function authenticateRequest(req) {
+export function authenticateRequest(req) {
   const token = extractTokenFromRequest(req);
-  if (!token) return null;
+  if (!token) {
+    throw new Error('Unauthorized');
+  }
 
   const user = verifyToken(token);
-  return user || null;
+  if (!user) {
+    throw new Error('Unauthorized');
+  }
+  
+  return user;
 }
 
-export async function login(username, password) {
-  const db = await getDb();
+export function login(username, password) {
+  const db = getDb();
 
   const user = db.prepare('SELECT * FROM users WHERE username = ?').get(username);
 
@@ -69,7 +73,7 @@ export async function login(username, password) {
     throw new Error('Invalid username or password');
   }
 
-  const passwordMatch = await verifyPassword(password, user.password_hash);
+  const passwordMatch = verifyPassword(password, user.password_hash);
 
   if (!passwordMatch) {
     throw new Error('Invalid username or password');
@@ -89,24 +93,23 @@ export async function login(username, password) {
   };
 }
 
-export async function createUser(username, email, password, role = 'user') {
-  const db = await getDb();
+export function createUser(username, email, password, role = 'user') {
+  const db = getDb();
 
-  const existingUser = await db.get('SELECT * FROM users WHERE username = ?', [username]);
+  const existingUser = db.prepare('SELECT * FROM users WHERE username = ?').get(username);
 
   if (existingUser) {
     throw new Error('Username already exists');
   }
 
-  const passwordHash = await hashPassword(password);
+  const passwordHash = hashPassword(password);
 
-  const result = await db.run(
-    'INSERT INTO users (username, email, password_hash, role) VALUES (?, ?, ?, ?)',
-    [username, email, passwordHash, role]
-  );
+  const result = db.prepare(
+    'INSERT INTO users (username, email, password_hash, role) VALUES (?, ?, ?, ?)'
+  ).run(username, email, passwordHash, role);
 
   return {
-    id: result.lastID,
+    id: result.lastInsertRowid,
     username,
     email,
     role,

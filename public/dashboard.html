@@ -404,7 +404,7 @@
                 <div id="devices" class="page-section">
                     <div class="flex-between mb-3">
                         <h2>Dispositivos Intelbras</h2>
-                        <button class="btn btn-primary" onclick="showModal('deviceModal')">➕ Novo Dispositivo</button>
+                        <button class="btn btn-primary" onclick="openAddDeviceModal()">➕ Novo Dispositivo</button>
                     </div>
 
                     <div class="grid grid-2">
@@ -524,8 +524,28 @@
                         <input type="text" id="cellPlcAddress" placeholder="192.168.1.50">
                     </div>
                     <div class="form-group">
-                        <label for="cellPlcPort">Porta PLC</label>
+                        <label for="cellPlcPort">Porta do PLC</label>
                         <input type="number" id="cellPlcPort" value="102">
+                    </div>
+                   <div class="form-row">
+                        <div class="form-group">
+                            <label for="cellPlcRack">Rack do CLP</label>
+                            <input type="number" id="cellPlcRack" class="form-control" value="0">
+                        </div>
+                        <div class="form-group">
+                            <label for="cellPlcSlot">Slot do CLP</label>
+                            <input type="number" id="cellPlcSlot" class="form-control" value="1">
+                        </div>
+                    </div>
+                    <div class="form-row">
+                        <div class="form-group">
+                            <label for="cellPlcDb">Data Block (DB)</label>
+                            <input type="number" id="cellPlcDb" class="form-control" placeholder="Ex: 1" required>
+                        </div>
+                        <div class="form-group">
+                            <label for="cellPlcStart">Byte Inicial</label>
+                            <input type="number" id="cellPlcStart" class="form-control" value="0">
+                        </div>
                     </div>
                 </form>
             </div>
@@ -564,6 +584,12 @@
                     <div class="form-group">
                         <label for="devicePassword">Senha</label>
                         <input type="password" id="devicePassword" required>
+                    </div>
+                    <div class="form-group">
+                        <label for="deviceCellId">Vincular a Célula (CLP)</label>
+                        <select id="deviceCellId" class="form-control" required>
+                            <option value="">Carregando células...</option>
+                        </select>
                     </div>
                 </form>
             </div>

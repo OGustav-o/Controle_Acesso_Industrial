@@ -77,10 +77,12 @@ export function initializeDatabase() {
       port INTEGER DEFAULT 80,
       username TEXT NOT NULL,
       password TEXT NOT NULL,
+      cell_id INTEGER, -- 👈 NOVA COLUNA: Relacionamento com o CLP
       status TEXT DEFAULT 'offline' CHECK(status IN ('online', 'offline')),
       last_sync_time DATETIME,
       created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-      updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+      updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+      FOREIGN KEY (cell_id) REFERENCES cells(id)
     );
 
     CREATE TABLE IF NOT EXISTS access_events (

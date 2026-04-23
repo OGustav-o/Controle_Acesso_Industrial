@@ -1,290 +1,249 @@
 import express from 'express';
-import cors from 'cors';
-import bodyParser from 'body-parser';
 import path from 'path';
 import { fileURLToPath } from 'url';
-import dotenv from 'dotenv';
-import fs from 'fs';
-import { getDb, initializeDatabase, seedDatabase } from './db.js';
-import { login, createUser, authenticateRequest, createToken } from './auth.js';
+import cors from 'cors';
 import multer from 'multer';
 import { v4 as uuidv4 } from 'uuid';
+import bcrypt from 'bcryptjs';
+import dotenv from 'dotenv';
 
+// Importação das funções do banco de dados e autenticação
+import { getDb, initializeDatabase, seedDatabase } from './db.js';
+import { login, authenticateRequest } from './auth.js';
+
+// Configurações iniciais
 dotenv.config();
-
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const app = express();
-const PORT = process.env.PORT || 3000;
+const port = process.env.PORT || 3000;
+
+// Inicialização do Banco de Dados
+initializeDatabase();
+seedDatabase();
 
 // Middleware
 app.use(cors());
-app.use(bodyParser.json({ limit: '50mb' }));
-app.use(bodyParser.urlencoded({ limit: '50mb', extended: true }));
+app.use(express.json());
+app.use(express.static(path.join(__dirname, '../public')));
+app.use('/uploads', express.static(path.join(__dirname, '../uploads')));
 
-// Configurar multer para upload de fotos
-const uploadDir = process.env.UPLOAD_DIR || path.join(__dirname, '../uploads/photos');
-if (!fs.existsSync(uploadDir)) {
-  fs.mkdirSync(uploadDir, { recursive: true });
-}
-
+// Configuração do Multer para Upload de Fotos
 const storage = multer.diskStorage({
   destination: (req, file, cb) => {
-    cb(null, uploadDir);
+    cb(null, path.join(__dirname, '../uploads/photos'));
   },
   filename: (req, file, cb) => {
     const ext = path.extname(file.originalname);
     cb(null, `${uuidv4()}${ext}`);
   }
 });
+const upload = multer({ storage });
 
-const upload = multer({ storage, limits: { fileSize: parseInt(process.env.MAX_FILE_SIZE || 10485760) } });
-
-// Servir arquivos estáticos
-app.use(express.static(path.join(__dirname, '../public')));
-app.use('/uploads', express.static(uploadDir));
-
-// ============ ROTAS DE AUTENTICAÇÃO ============
+// --- ROTAS DE AUTENTICAÇÃO ---
 
 app.post('/api/auth/login', async (req, res) => {
   try {
     const { username, password } = req.body;
-
-    if (!username || !password) {
-      return res.status(400).json({ error: 'Username and password are required' });
-    }
-
     const result = await login(username, password);
     res.json(result);
   } catch (error) {
-    console.error('[Auth] Login failed:', error);
-    res.status(401).json({ error: error.message || 'Login failed' });
+    res.status(401).json({ error: error.message });
   }
 });
 
-app.post('/api/auth/logout', (req, res) => {
-  res.json({ success: true });
-});
+// --- ROTAS DE UTILIZADORES (USERS) ---
 
-app.get('/api/auth/me', async (req, res) => {
+app.get('/api/users', (req, res) => {
   try {
-    const user = await authenticateRequest(req);
-    if (!user) {
-      return res.status(401).json({ error: 'Not authenticated' });
-    }
-    res.json(user);
-  } catch (error) {
-    res.status(401).json({ error: 'Not authenticated' });
-  }
-});
-
-// ============ ROTAS DE USUÁRIOS ============
-
-app.get('/api/users', async (req, res) => {
-  try {
-    const user = await authenticateRequest(req);
-    if (!user) {
-      return res.status(401).json({ error: 'Not authenticated' });
-    }
-
-    const db = await getDb();
-    const users = await db.all('SELECT id, username, email, role, photo_url, created_at FROM users');
+    const user = authenticateRequest(req);
+    const db = getDb();
+    
+    // CORREÇÃO: .prepare().all() em vez de .all()
+    const users = db.prepare(`
+      SELECT id, username, email, role, photo_url, created_at 
+      FROM users 
+      ORDER BY created_at DESC
+    `).all();
+    
     res.json(users);
   } catch (error) {
     console.error('[Users] Get failed:', error);
-    res.status(500).json({ error: 'Failed to get users' });
+    res.status(error.message === 'Unauthorized' ? 401 : 500).json({ error: error.message });
   }
 });
 
 app.post('/api/users', upload.single('photo'), async (req, res) => {
   try {
-    const user = await authenticateRequest(req);
-    if (!user || user.role !== 'admin') {
-      return res.status(403).json({ error: 'Forbidden' });
-    }
-
+    authenticateRequest(req); // Verifica permissões
     const { username, email, password, role } = req.body;
-    const photoUrl = req.file ? `/uploads/${req.file.filename}` : null;
+    const photoUrl = req.file ? `/uploads/photos/${req.file.filename}` : null;
+    
+    // Hash da senha
+    const passwordHash = bcrypt.hashSync(password, 10);
+    
+    // 🛡️ SANITIZAÇÃO DO PAPEL (ROLE)
+    // Converte para minúsculo, tira espaços e verifica se é um dos 3 permitidos. 
+    // Caso contrário, força o padrão 'user'.
+    const parsedRole = (role || '').toString().trim().toLowerCase();
+    const safeRole = ['admin', 'user', 'operator'].includes(parsedRole) ? parsedRole : 'user';
+    
+    const db = getDb();
+    const result = db.prepare(`
+      INSERT INTO users (username, email, password_hash, role, photo_url)
+      VALUES (?, ?, ?, ?, ?)
+    `).run(username, email, passwordHash, safeRole, photoUrl);
 
-    if (!username || !password) {
-      return res.status(400).json({ error: 'Username and password are required' });
-    }
-
-    const db = await getDb();
-    const passwordHash = await require('bcryptjs').hash(password, 10);
-
-    const result = await db.run(
-      'INSERT INTO users (username, email, password_hash, role, photo_url) VALUES (?, ?, ?, ?, ?)',
-      [username, email || null, passwordHash, role || 'user', photoUrl]
-    );
-
-    res.json({
-      id: result.lastID,
-      username,
-      email,
-      role: role || 'user',
-      photo_url: photoUrl,
-    });
+    res.status(201).json({ id: result.lastInsertRowid, username, role: safeRole });
   } catch (error) {
     console.error('[Users] Create failed:', error);
-    res.status(500).json({ error: error.message || 'Failed to create user' });
+    
+    // Devolve uma mensagem mais clara caso o erro seja de conflito (ex: usuário já existe)
+    if (error.code === 'SQLITE_CONSTRAINT_UNIQUE') {
+        return res.status(400).json({ error: 'Este nome de usuário já está em uso.' });
+    }
+    
+    res.status(500).json({ error: 'Erro ao criar usuário' });
   }
 });
 
-// ============ ROTAS DE CÉLULAS ============
+// --- ROTAS DE CÉLULAS (CELLS) ---
 
-app.get('/api/cells', async (req, res) => {
+app.get('/api/cells', (req, res) => {
   try {
-    const user = await authenticateRequest(req);
-    if (!user) {
-      return res.status(401).json({ error: 'Not authenticated' });
-    }
-
-    const db = await getDb();
-    const cells = await db.all('SELECT * FROM cells ORDER BY name');
+    authenticateRequest(req);
+    const db = getDb();
+    const cells = db.prepare('SELECT * FROM cells').all();
     res.json(cells);
   } catch (error) {
-    console.error('[Cells] Get failed:', error);
-    res.status(500).json({ error: 'Failed to get cells' });
+    res.status(500).json({ error: 'Erro ao listar células' });
   }
 });
 
-app.post('/api/cells', async (req, res) => {
+app.post('/api/cells', (req, res) => {
   try {
-    const user = await authenticateRequest(req);
-    if (!user || user.role !== 'admin') {
-      return res.status(403).json({ error: 'Forbidden' });
-    }
-
-    const { name, description, plcAddress, plcPort, plcRack, plcSlot, plcDatabase, plcStartByte } = req.body;
-
-    if (!name) {
-      return res.status(400).json({ error: 'Cell name is required' });
-    }
-
-    const db = await getDb();
-    const result = await db.run(
-      'INSERT INTO cells (name, description, plc_address, plc_port, plc_rack, plc_slot, plc_database, plc_start_byte) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
-      [name, description || null, plcAddress || null, plcPort || 102, plcRack || 0, plcSlot || 1, plcDatabase || null, plcStartByte || null]
+    authenticateRequest(req);
+    // Recebendo TODOS os parâmetros necessários para o Python Snap7
+    const { 
+      name, description, plc_address, plc_port, 
+      plc_rack, plc_slot, plc_database, plc_start_byte 
+    } = req.body;
+    
+    const db = getDb();
+    const result = db.prepare(`
+      INSERT INTO cells (name, description, plc_address, plc_port, plc_rack, plc_slot, plc_database, plc_start_byte, status)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'offline')
+    `).run(
+      name, description, plc_address, 
+      plc_port || 102, 
+      plc_rack || 0, 
+      plc_slot || 1, 
+      plc_database, 
+      plc_start_byte || 0
     );
 
-    res.json({
-      id: result.lastID,
-      name,
-      description,
-      plcAddress,
-      plcPort: plcPort || 102,
-      plcRack: plcRack || 0,
-      plcSlot: plcSlot || 1,
-      plcDatabase,
-      plcStartByte,
-    });
+    res.status(201).json({ id: result.lastInsertRowid, name });
   } catch (error) {
     console.error('[Cells] Create failed:', error);
-    res.status(500).json({ error: error.message || 'Failed to create cell' });
+    res.status(500).json({ error: 'Erro ao criar célula' });
   }
 });
 
-// ============ ROTAS DE EVENTOS DE ACESSO ============
+// --- ROTAS DE EVENTOS E PRESENÇA ---
 
-app.get('/api/access-events', async (req, res) => {
+app.get('/api/events', (req, res) => {
   try {
-    const user = await authenticateRequest(req);
-    if (!user) {
-      return res.status(401).json({ error: 'Not authenticated' });
-    }
-
-    const db = await getDb();
-    const events = await db.all(`
-      SELECT ae.*, u.username, c.name as cell_name
-      FROM access_events ae
-      LEFT JOIN users u ON ae.user_id = u.id
-      LEFT JOIN cells c ON ae.cell_id = c.id
-      ORDER BY ae.timestamp DESC
-      LIMIT 100
-    `);
+    authenticateRequest(req);
+    const db = getDb();
+    const events = db.prepare(`
+      SELECT e.*, u.username, c.name as cell_name 
+      FROM access_events e
+      JOIN users u ON e.user_id = u.id
+      JOIN cells c ON e.cell_id = c.id
+      ORDER BY e.timestamp DESC LIMIT 100
+    `).all();
     res.json(events);
   } catch (error) {
-    console.error('[Access Events] Get failed:', error);
-    res.status(500).json({ error: 'Failed to get access events' });
+    res.status(500).json({ error: 'Erro ao obter eventos' });
   }
 });
 
-app.post('/api/access-events', async (req, res) => {
+// Endpoint para o SDK/Dispositivo Intelbras enviar eventos
+app.post('/api/access-events', (req, res) => {
   try {
-    const user = await authenticateRequest(req);
-    if (!user) {
-      return res.status(401).json({ error: 'Not authenticated' });
+    const { user_id, cell_id, event_type, source } = req.body;
+    const db = getDb();
+    
+    db.prepare(`
+      INSERT INTO access_events (user_id, cell_id, event_type, source)
+      VALUES (?, ?, ?, ?)
+    `).run(user_id, cell_id, event_type, source || 'intelbras');
+
+    res.json({ success: true });
+  } catch (error) {
+    res.status(500).json({ error: 'Erro ao processar evento de acesso' });
+  }
+});
+// --- ROTAS DE DISPOSITIVOS INTELBRAS ---
+
+app.get('/api/intelbras-devices', (req, res) => {
+  try {
+    authenticateRequest(req);
+    const db = getDb();
+    // Faz um JOIN para trazer também o nome da Célula vinculada
+    const devices = db.prepare(`
+      SELECT d.id, d.name, d.ip_address, d.port, d.status, d.last_sync_time, c.name as cell_name 
+      FROM intelbras_devices d
+      LEFT JOIN cells c ON d.cell_id = c.id
+    `).all();
+    res.json(devices);
+  } catch (error) {
+    res.status(500).json({ error: 'Erro ao listar dispositivos' });
+  }
+});
+
+app.post('/api/intelbras-devices', (req, res) => {
+  try {
+    const user = authenticateRequest(req);
+    if (!user || user.role !== 'admin') return res.status(403).json({ error: 'Acesso negado' });
+
+    // Agora recebe também o cell_id do frontend
+    const { name, ipAddress, port, username, password, cell_id } = req.body;
+
+    const db = getDb();
+    const result = db.prepare(`
+      INSERT INTO intelbras_devices (name, ip_address, port, username, password, cell_id, status)
+      VALUES (?, ?, ?, ?, ?, ?, 'offline')
+    `).run(name, ipAddress, port || 80, username, password, cell_id || null);
+
+    res.status(201).json({ id: result.lastInsertRowid, name });
+  } catch (error) {
+    res.status(500).json({ error: 'Erro ao criar dispositivo' });
+  }
+});
+
+app.delete('/api/intelbras-devices/:id', (req, res) => {
+  try {
+    const user = authenticateRequest(req);
+    if (!user || user.role !== 'admin') {
+      return res.status(403).json({ error: 'Acesso negado' });
     }
 
-    const { userId, cellId, eventType, source, status, details } = req.body;
-
-    if (!userId || !cellId || !eventType) {
-      return res.status(400).json({ error: 'Missing required fields' });
-    }
-
-    const db = await getDb();
-    const result = await db.run(
-      'INSERT INTO access_events (user_id, cell_id, event_type, source, status, details) VALUES (?, ?, ?, ?, ?, ?)',
-      [userId, cellId, eventType, source || 'manual', status || 'success', details || null]
-    );
-
-    res.json({ id: result.lastID, success: true });
+    const { id } = req.params;
+    const db = getDb();
+    
+    db.prepare('DELETE FROM intelbras_devices WHERE id = ?').run(id);
+    res.json({ success: true });
   } catch (error) {
-    console.error('[Access Events] Create failed:', error);
-    res.status(500).json({ error: error.message || 'Failed to create access event' });
+    console.error('[Devices] Delete failed:', error);
+    res.status(500).json({ error: 'Erro ao deletar dispositivo' });
   }
 });
 
-// ============ ROTAS DE PRESENÇA ============
-
-app.get('/api/cell-presence', async (req, res) => {
-  try {
-    const user = await authenticateRequest(req);
-    if (!user) {
-      return res.status(401).json({ error: 'Not authenticated' });
-    }
-
-    const db = await getDb();
-    const presence = await db.all(`
-      SELECT cp.*, u.username, c.name as cell_name
-      FROM cell_presence cp
-      LEFT JOIN users u ON cp.user_id = u.id
-      LEFT JOIN cells c ON cp.cell_id = c.id
-      WHERE cp.status = 'inside'
-      ORDER BY cp.entry_time DESC
-    `);
-    res.json(presence);
-  } catch (error) {
-    console.error('[Cell Presence] Get failed:', error);
-    res.status(500).json({ error: 'Failed to get cell presence' });
-  }
+// Inicialização do Servidor
+app.listen(port, () => {
+  console.log(`
+  🚀 Servidor Industrial Ativo
+  📡 Endereço: http://localhost:${port}
+  📂 Base de dados: SQLite Ativo
+  `);
 });
-
-// ============ ROTA DE INICIALIZAÇÃO ============
-
-app.get('/api/health', (req, res) => {
-  res.json({ status: 'ok', message: 'Server is running' });
-});
-
-// ============ INICIALIZAR SERVIDOR ============
-
-async function startServer() {
-  try {
-    console.log('🔄 Inicializando banco de dados...');
-    await initializeDatabase();
-    await seedDatabase();
-
-    app.listen(PORT, () => {
-      console.log(`✅ Servidor rodando em http://localhost:${PORT}`);
-      console.log(`📊 Banco de dados: ${process.env.DATABASE_PATH || './data/app.db'}`);
-      console.log('\n🔐 Credenciais padrão:');
-      console.log('   Usuário: admin');
-      console.log('   Senha: admin123\n');
-    });
-  } catch (error) {
-    console.error('❌ Erro ao iniciar servidor:', error);
-    process.exit(1);
-  }
-}
-
-startServer();
