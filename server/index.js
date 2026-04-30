@@ -1,5 +1,5 @@
 import express from 'express';
-import path from 'path';
+import path from 'path';    
 import { fileURLToPath } from 'url';
 import cors from 'cors';
 import multer from 'multer';
@@ -7,7 +7,6 @@ import { v4 as uuidv4 } from 'uuid';
 import bcrypt from 'bcryptjs';
 import dotenv from 'dotenv';
 import { execFile } from 'child_process';
-import path from 'path';
 
 // Importação das funções do banco de dados e autenticação
 import { getDb, initializeDatabase, seedDatabase } from './db.js';
@@ -18,6 +17,8 @@ dotenv.config();
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const app = express();
 const port = process.env.PORT || 3000;
+const upload = multer();
+const uploadFace = multer({ dest: 'uploads/' });
 
 // Inicialização do Banco de Dados
 initializeDatabase();
@@ -29,6 +30,12 @@ app.use(express.json());
 app.use(express.static(path.join(__dirname, '../public')));
 app.use('/uploads', express.static(path.join(__dirname, '../uploads')));
 
+// RADAR DE TRÁFEGO - Imprime qualquer tentativa de comunicação com o servidor
+app.use((req, res, next) => {
+  console.log(`[TRÁFEGO REDE] IP: ${req.ip} tentou aceder -> ${req.method} ${req.url}`);
+  next();
+});
+
 // Configuração do Multer para Upload de Fotos
 const storage = multer.diskStorage({
   destination: (req, file, cb) => {
@@ -39,8 +46,73 @@ const storage = multer.diskStorage({
     cb(null, `${uuidv4()}${ext}`);
   }
 });
-const upload = multer({ storage });
 
+// Rota configurada para receber os eventos da Intelbras
+app.post('/notification', 
+  // 1. O INTERCETOR: Engana o Multer mudando o nome do Content-Type
+  (req, res, next) => {
+    if (req.headers['content-type'] && req.headers['content-type'].includes('multipart/mixed')) {
+      req.headers['content-type'] = req.headers['content-type'].replace('multipart/mixed', 'multipart/form-data');
+    }
+    next();
+  }, 
+  // 2. O MULTER: Agora ele vai aceitar e processar o pacote
+  upload.any(), 
+  
+  // 3. A SUA LÓGICA PRINCIPAL
+  async (req, res) => {
+    try {
+      // Verifica se o campo info existe (onde a Intelbras manda o JSON)
+      if (!req.body || !req.body.info) {
+        return res.status(200).send(); // Responde 200 para não travar o dispositivo
+      }
+
+      const payload = JSON.parse(req.body.info);
+      const deviceIp = req.ip.replace('::ffff:', '');
+
+      if (!payload.Events || payload.Events.length === 0) return res.status(200).send();
+      
+      const event = payload.Events[0];
+      if (event.Code !== 'AccessControl') return res.status(200).send();
+
+      const data = event.Data;
+      const userId = data.UserID || data.CardNo;
+      const isAuthorized = data.Status === 1; // 1 = Liberado
+
+      if (userId && isAuthorized) {
+        console.log(`\n[INTELBRAS] 👤 Usuário ID: ${userId} reconhecido pelo IP: ${deviceIp}`);
+        
+        const db = getDb();
+        const device = db.prepare('SELECT * FROM intelbras_devices WHERE ip_address = ?').get(deviceIp);
+
+        if (device) {
+          // 4. Salva o evento no banco de dados
+          db.prepare(`
+            INSERT INTO access_events (user_id, cell_id, event_type, source, status)
+            VALUES (?, ?, 'entry', 'intelbras', 'success')
+          `).run(userId, device.cell_id);
+
+          // 5. Envia o comando para abrir o CLP
+          const cell = db.prepare('SELECT * FROM cells WHERE id = ?').get(device.cell_id);
+          if (cell && cell.plc_database) {
+            console.log(`[Automação] ⚙️ Enviando comando de abertura para CLP: ${cell.name}...`);
+            await runPlcCommand(cell, 'write', 1);
+
+            setTimeout(() => {
+              runPlcCommand(cell, 'write', 0).catch(() => {});
+            }, 2000);
+          }
+        }
+      }
+
+      // 6. Confirmação obrigatória para a Intelbras
+      res.status(200).send();
+
+    } catch (error) {
+      console.error('[Erro] Falha ao processar evento:', error);
+      res.status(200).send(); // Mantemos 200 para a Intelbras não achar que o servidor caiu
+    }
+});
 // --- ROTAS DE AUTENTICAÇÃO ---
 
 app.post('/api/auth/login', async (req, res) => {
@@ -50,6 +122,75 @@ app.post('/api/auth/login', async (req, res) => {
     res.json(result);
   } catch (error) {
     res.status(401).json({ error: error.message });
+  }
+});
+
+app.post('/api/users/register', uploadFace.single('photo'), async (req, res) => {
+  try {
+    const { name } = req.body;
+    // Transforma a string recebida de volta num Array de IDs
+    const targetDevices = JSON.parse(req.body.devices); 
+    const photoFile = req.file;
+
+    const db = getDb();
+    const imagePath = path.resolve(photoFile.path);
+
+    // 1. Cria o utilizador no BD (Já não tem cell_id fixo aqui)
+    const stmt = db.prepare('INSERT INTO users (name, created_at) VALUES (?, CURRENT_TIMESTAMP)');
+    const info = stmt.run(name);
+    const newUserId = info.lastInsertRowid;
+
+    console.log(`[Cadastro] Sincronizando usuário ${name} com ${targetDevices.length} dispositivos...`);
+
+    // 2. Prepara as "Tarefas" para sincronizar com cada leitor facial
+    const syncTasks = targetDevices.map(deviceId => {
+      return new Promise((resolve, reject) => {
+        const device = db.prepare('SELECT * FROM intelbras_devices WHERE id = ?').get(deviceId);
+        if (!device) return reject(`Dispositivo ${deviceId} não encontrado.`);
+
+        // 2.1 Regista a permissão no Banco de Dados (Tabela de Junção)
+        db.prepare('INSERT OR IGNORE INTO user_access (user_id, cell_id) VALUES (?, ?)').run(newUserId, device.cell_id);
+
+        const scriptPath = path.join(__dirname, 'API', 'register_face.py');
+        const args = [
+          scriptPath,
+          '--ip', device.ip_address,
+          '--user', device.username,
+          '--password', device.password,
+          '--userid', newUserId.toString(),
+          '--name', name,
+          '--image', imagePath
+        ];
+
+        // 2.2 Dispara o Python para este dispositivo específico
+        execFile('python', args, (error, stdout, stderr) => {
+          if (error) return reject(`Falha no dispositivo ${device.name}: ${stderr || error.message}`);
+          resolve(`Sucesso no dispositivo ${device.name}`);
+        });
+      });
+    });
+
+    // 3. Executa todas as sincronizações ao mesmo tempo
+    const results = await Promise.allSettled(syncTasks);
+
+    // 4. Limpa a foto temporária do servidor
+    fs.unlink(imagePath, () => {});
+
+    // 5. Analisa os resultados (se algum falhou, podemos avisar o front-end)
+    const falhas = results.filter(r => r.status === 'rejected');
+    
+    if (falhas.length === 0) {
+      res.json({ success: true, message: 'Usuário cadastrado em todas as máquinas com sucesso!' });
+    } else {
+      res.json({ 
+        success: true, // Ainda é "sucesso" porque guardou no BD, mas com ressalvas
+        message: `Cadastrado, mas falhou em ${falhas.length} dispositivos. Verifique a conexão das máquinas.` 
+      });
+    }
+
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'Erro interno ao processar cadastro múltiplo.' });
   }
 });
 
@@ -169,22 +310,74 @@ app.get('/api/events', (req, res) => {
   }
 });
 
-// Endpoint para o SDK/Dispositivo Intelbras enviar eventos
-app.post('/api/access-events', (req, res) => {
+// Endpoint acionado pelo Leitor Facial Intelbras quando reconhece um rosto
+
+// --- ROTA PARA RECEBER EVENTOS DIRETOS DA INTELBRAS (MODO PUSH) ---
+// --- SERVIDOR DE EVENTOS PADRÃO INTELBRAS (MODO PUSH / AUTO CGI) ---
+app.post('/api/access-events', async (req, res) => {
+  const deviceIp = req.ip.replace('::ffff:', '');
+  const payload = req.body;
+
+  // 1. Tratamento de Heartbeat (Manter Conexão Viva)
+  // O equipamento envia "Code": "Heartbeat" periodicamente.
+  if (payload.Code === 'Heartbeat') {
+    return res.status(200).json({ status: "ok" });
+  }
+
+  // 2. Verificação do Código de Evento
+  // A Intelbras identifica acesso facial como "AccessControl"
+  if (payload.Code !== 'AccessControl') {
+    console.log(`[Rede] Notificação ignorada (Código: ${payload.Code}) de ${deviceIp}`);
+    return res.status(200).send(); 
+  }
+
   try {
-    const { user_id, cell_id, event_type, source } = req.body;
     const db = getDb();
     
-    db.prepare(`
-      INSERT INTO access_events (user_id, cell_id, event_type, source)
-      VALUES (?, ?, ?, ?)
-    `).run(user_id, cell_id, event_type, source || 'intelbras');
+    // 3. Extração de Dados do Padrão Intelbras
+    // No padrão oficial, os detalhes ficam dentro do objeto "Data"
+    const eventData = payload.Data || {};
+    const userId = eventData.UserID || eventData.CardNo;
+    const eventType = eventData.Method === 1 ? 'entry' : 'exit'; // Exemplo: 1 para entrada
 
-    res.json({ success: true });
+    // 4. Localização do Dispositivo no Banco
+    const device = db.prepare('SELECT * FROM intelbras_devices WHERE ip_address = ?').get(deviceIp);
+
+    if (!device) {
+      console.warn(`[Acesso] Dispositivo não reconhecido. IP: ${deviceIp}`);
+      return res.status(404).send();
+    }
+
+    if (userId) {
+      console.log(`\n[INTELBRAS] 👤 Identificado: UserID ${userId} em ${device.name}`);
+      
+      // 5. Registo de Log
+      db.prepare(`
+        INSERT INTO access_events (user_id, cell_id, event_type, source, status)
+        VALUES (?, ?, ?, 'intelbras', 'success')
+      `).run(userId, device.cell_id, eventType);
+
+      // 6. Comando para o CLP Siemens
+      const cell = db.prepare('SELECT * FROM cells WHERE id = ?').get(device.cell_id);
+      if (cell && cell.plc_database) {
+        console.log(`[Automação] ⚙️ Enviando comando de abertura para CLP: ${cell.name}`);
+        await runPlcCommand(cell, 'write', 1);
+
+        setTimeout(() => {
+          runPlcCommand(cell, 'write', 0).catch(() => {});
+        }, 2000);
+      }
+    }
+
+    // Resposta padrão 200 OK exigida pelo hardware para confirmar receção
+    res.status(200).send();
+
   } catch (error) {
-    res.status(500).json({ error: 'Erro ao processar evento de acesso' });
+    console.error('[Intelbras Event Error]:', error);
+    res.status(500).send();
   }
 });
+
 // --- ROTAS DE DISPOSITIVOS INTELBRAS ---
 
 app.get('/api/intelbras-devices', (req, res) => {
@@ -291,6 +484,76 @@ function runPlcCommand(cellConfig, action, value = null) {
   });
 }
 
+/**
+ * Função utilitária para invocar o script Python da Intelbras.
+ * @param {Object} deviceConfig - Dados do dispositivo (IP, user, pass)
+ * @param {String} action - Ação a executar ('test' ou 'open')
+ */
+function runIntelbrasCommand(deviceConfig, action) {
+  return new Promise((resolve, reject) => {
+    // Certifique-se que o nome do ficheiro aqui está igual ao que salvou
+    const scriptPath = path.join(__dirname, 'API', 'intelbras_bridge.py');
+    
+    const args = [
+      scriptPath,
+      '--ip', deviceConfig.ip_address,
+      '--user', deviceConfig.username,
+      '--password', deviceConfig.password,
+      '--action', action
+    ];
+
+    execFile('python', args, (error, stdout, stderr) => {
+      if (stdout) {
+        try {
+          const result = JSON.parse(stdout);
+          if (!result.success) {
+            console.error(`[Intelbras Bridge] Erro (${deviceConfig.name}):`, result.error);
+            return reject(result.error);
+          }
+          return resolve(result);
+        } catch (e) {
+          // Ignora erros de parse
+        }
+      }
+
+      if (error) {
+        const trueError = stderr || stdout || error.message;
+        console.error('[Intelbras Bridge] Falha crítica:', trueError);
+        return reject(trueError);
+      }
+    });
+  });
+}
+
+// --- Rota para testar a comunicação com a Intelbras ---
+app.post('/api/intelbras-devices/:id/test', async (req, res) => {
+  try {
+    authenticateRequest(req);
+    const { id } = req.params;
+    
+    const db = getDb();
+    const device = db.prepare('SELECT * FROM intelbras_devices WHERE id = ?').get(id);
+    
+    if (!device) return res.status(404).json({ error: 'Dispositivo não encontrado' });
+
+    // Executa o Python mandando fazer um 'test'
+    const result = await runIntelbrasCommand(device, 'test');
+
+    // Se passou, atualiza o status no banco de dados para online
+    db.prepare("UPDATE intelbras_devices SET status = 'online', last_sync_time = CURRENT_TIMESTAMP WHERE id = ?")
+      .run(id);
+
+    res.json({ success: true, message: 'Dispositivo Online e Respondendo!' });
+
+  } catch (error) {
+    // Se falhou, atualiza o status para offline
+    const db = getDb();
+    db.prepare("UPDATE intelbras_devices SET status = 'offline' WHERE id = ?").run(req.params.id);
+    
+    res.status(500).json({ error: error.toString() });
+  }
+});
+
 // Rota de Teste de Conexão com o CLP (Célula)
 app.post('/api/cells/:id/test', async (req, res) => {
   try {
@@ -332,10 +595,15 @@ app.post('/api/cells/:id/test', async (req, res) => {
 });
 
 // Inicialização do Servidor
-app.listen(port, () => {
+
+const PORT = 3000;
+app.listen(PORT, '0.0.0.0', () => {
+  console.log(`Servidor aberto para a rede na porta ${PORT}`);
+});
+/*app.listen(port, () => {
   console.log(`
   🚀 Servidor Industrial Ativo
   📡 Endereço: http://localhost:${port}
   📂 Base de dados: SQLite Ativo
   `);
-});
+});*/

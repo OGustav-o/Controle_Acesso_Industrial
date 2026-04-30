@@ -111,6 +111,14 @@ export function initializeDatabase() {
       FOREIGN KEY (user_id) REFERENCES users(id),
       FOREIGN KEY (cell_id) REFERENCES cells(id)
     );
+   
+    CREATE TABLE user_access (
+      user_id INTEGER,
+      cell_id INTEGER,
+      FOREIGN KEY(user_id) REFERENCES users(id),
+      FOREIGN KEY(cell_id) REFERENCES cells(id),
+      PRIMARY KEY (user_id, cell_id)
+    );
 
     CREATE INDEX IF NOT EXISTS idx_access_events_user_id ON access_events(user_id);
     CREATE INDEX IF NOT EXISTS idx_cell_presence_user_id ON cell_presence(user_id);

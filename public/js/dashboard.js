@@ -272,6 +272,96 @@ async function handleAddUser(event) {
     }
 }
 
+// --- LÓGICA DE CADASTRO DE USUÁRIO COM FACE ---
+
+// Abre o modal e busca os dados necessários (Células e Dispositivos Intelbras)
+async function openUserModal() {
+    try {
+        // Captura todos os IDs de dispositivos selecionados num Array
+        const selectElement = document.getElementById('targetDevices');
+        const selectedDevices = Array.from(selectElement.selectedOptions).map(option => option.value);
+
+        if (selectedDevices.length === 0) {
+            showAlert('Selecione pelo menos um dispositivo!', 'warning');
+            return;
+        }
+
+        const formData = new FormData();
+        formData.append('name', name);
+        // Enviamos o Array transformado em String (JSON)
+        formData.append('devices', JSON.stringify(selectedDevices)); 
+        formData.append('photo', photoFile);
+    } catch (error) {
+        showAlert('Erro ao carregar dados para o cadastro', 'danger');
+    }
+}
+
+function closeUserModal() {
+    document.getElementById('userModal').style.display = 'none';
+    document.getElementById('userRegistrationForm').reset();
+    document.getElementById('photoPreview').style.display = 'none';
+}
+
+// Intercepta o envio do formulário
+document.getElementById('userRegistrationForm').addEventListener('submit', async (e) => {
+    e.preventDefault();
+
+    const name = document.getElementById('userName').value;
+    const cell_id = document.getElementById('userCell').value;
+    const intelbras_device_id = document.getElementById('targetDevice').value;
+    const photoFile = document.getElementById('userPhoto').files[0];
+
+    if (!photoFile) {
+        showAlert('A foto do rosto é obrigatória para biometria!', 'warning');
+        return;
+    }
+
+    // Usamos FormData para enviar a imagem binária
+    const formData = new FormData();
+    formData.append('name', name);
+    formData.append('cell_id', cell_id);
+    formData.append('intelbras_device_id', intelbras_device_id);
+    formData.append('photo', photoFile);
+
+    try {
+        showAlert('⏳ Cadastrando e enviando biometria para o dispositivo...', 'info');
+
+        const response = await fetch('/api/users/register', {
+            method: 'POST',
+            body: formData,
+            // Importante: Não definir Content-Type manualmente aqui, 
+            // o navegador fará isso automaticamente para FormData
+            headers: {
+                'Authorization': `Bearer ${localStorage.getItem('token')}` // Se usar JWT
+            }
+        });
+
+        const result = await response.json();
+
+        if (response.ok) {
+            showAlert('✅ Usuário cadastrado e sincronizado com sucesso!', 'success');
+            closeUserModal();
+            loadDashboardData(); // Função que atualiza sua tabela de usuários
+        } else {
+            showAlert('❌ Erro: ' + result.error, 'danger');
+        }
+    } catch (error) {
+        console.error(error);
+        showAlert('❌ Erro na comunicação com o servidor.', 'danger');
+    }
+});
+
+// Preview da imagem selecionada
+document.getElementById('userPhoto').addEventListener('change', function() {
+    const reader = new FileReader();
+    reader.onload = function(e) {
+        const preview = document.getElementById('photoPreview');
+        preview.src = e.target.result;
+        preview.style.display = 'block';
+    }
+    reader.readAsDataURL(this.files[0]);
+});
+
 // Adicionar nova célula
 async function handleAddCell(event) {
     event.preventDefault();
@@ -369,16 +459,30 @@ async function deleteDevice(deviceId) {
 }
 
 // Testar dispositivo
-async function testDevice(deviceId) {
+async function testDevice(id) {
     try {
-        const result = await ApiClient.post(`/intelbras-devices/${deviceId}/test`, {});
-        if (result.success) {
-            showAlert('✅ Conexão bem-sucedida!', 'success');
+        showAlert('⏳ Testando conexão com o dispositivo...', 'info');
+        
+        // Dispara o teste no backend
+        const response = await ApiClient.post(`/intelbras-devices/${id}/test`);
+        showAlert('✅ ' + response.message, 'success');
+        
+        // Solução: Garante que os dados sejam buscados novamente do servidor
+        if (typeof loadDashboardData === 'function') {
+            await loadDashboardData(); // Refaz o GET no servidor
         } else {
-            showAlert('❌ Falha na conexão', 'danger');
+            // Fallback: Recarrega a página suavemente após 1 segundo se a função acima tiver outro nome
+            setTimeout(() => { window.location.reload(); }, 1000);
         }
+
     } catch (error) {
-        showAlert('❌ ' + error.message, 'danger');
+        showAlert('❌ Erro na conexão: ' + error.message, 'danger');
+        
+        if (typeof loadDashboardData === 'function') {
+            await loadDashboardData();
+        } else {
+            setTimeout(() => { window.location.reload(); }, 1000);
+        }
     }
 }
 // Função para popular o select de células no modal de dispositivos
