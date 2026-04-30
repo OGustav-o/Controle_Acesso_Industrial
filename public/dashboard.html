@@ -354,7 +354,7 @@
                 <div id="users" class="page-section">
                     <div class="flex-between mb-3">
                         <h2>Gerenciar Usuários</h2>
-                        <button class="btn btn-primary" onclick="showModal('userModal')">➕ Novo Usuário</button>
+                        <button class="btn btn-primary" onclick="openUserModal()">➕ Novo Usuário</button>
                     </div>
 
                     <div class="card">
@@ -460,48 +460,6 @@
         </div>
     </div>
 
-    <!-- User Modal -->
-    <div id="userModal" class="modal">
-        <div class="modal-content">
-            <div class="modal-header">
-                <h2>Novo Usuário</h2>
-                <button class="modal-close">✕</button>
-            </div>
-            <div class="modal-body">
-                <form id="userForm" onsubmit="handleAddUser(event)">
-                    <div class="form-group">
-                        <label for="userUsername">Usuário</label>
-                        <input type="text" id="userUsername" required>
-                    </div>
-                    <div class="form-group">
-                        <label for="userEmail">Email</label>
-                        <input type="email" id="userEmail">
-                    </div>
-                    <div class="form-group">
-                        <label for="userPassword">Senha</label>
-                        <input type="password" id="userPassword" required>
-                    </div>
-                    <div class="form-group">
-                        <label for="userRole">Papel</label>
-                        <select id="userRole">
-                            <option value="user">Usuário</option>
-                            <option value="operator">Operador</option>
-                            <option value="admin">Administrador</option>
-                        </select>
-                    </div>
-                    <div class="form-group">
-                        <label for="userPhoto">Foto</label>
-                        <input type="file" id="userPhoto" accept="image/*">
-                    </div>
-                </form>
-            </div>
-            <div class="modal-footer">
-                <button class="btn btn-secondary" onclick="hideModal('userModal')">Cancelar</button>
-                <button class="btn btn-primary" onclick="document.getElementById('userForm').dispatchEvent(new Event('submit'))">Salvar</button>
-            </div>
-        </div>
-    </div>
-
     <!-- Cell Modal -->
     <div id="cellModal" class="modal">
         <div class="modal-content">
@@ -600,23 +558,18 @@
         </div>
     </div>
 
-    <div class="d-flex justify-content-between align-items-center mb-4">
-        <h2>Gerenciamento de Usuários</h2>
-        <button class="btn btn-primary" onclick="openUserModal()">+ Novo Usuário</button>
-    </div>
-
     <!-- User Modal -->
-    <div id="userModal" class="modal-custom" style="display:none;">
+    <div id="userModal" class="modal">
         <div class="modal-content">
             <div class="modal-header">
-                <h3>Cadastrar Novo Usuário (Facial)</h3>
-                <span class="close-btn" onclick="closeUserModal()">&times;</span>
+                <h2>Cadastrar Novo Usuário (Facial)</h2>
+                <button class="modal-close" onclick="closeUserModal()">✕</button>
             </div>
             <div class="modal-body">
                 <form id="userRegistrationForm">
                     <div class="form-group mb-3">
                         <label>Nome Completo:</label>
-                        <input type="text" id="userName" class="form-control" required>
+                        <input type="text" id="newUserName" class="form-control" required>
                     </div>
 
                     <div class="form-group mb-3">
@@ -626,10 +579,10 @@
                     </div>
 
                     <div class="form-group mb-3">
-                        <label>Dispositivo Intelbras para Cadastro:</label>
-                        <select id="targetDevice" class="form-control" required>
-                            </select>
-                    </div>
+                        <label>Selecione os Dispositivos (Segure CTRL para selecionar vários):</label>
+                        <select id="targetDevices" class="form-control" multiple required>
+                        </select>
+                    </div>    
 
                     <div class="form-group mb-3">
                         <label>Foto do Rosto:</label>

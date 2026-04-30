@@ -112,7 +112,7 @@ export function initializeDatabase() {
       FOREIGN KEY (cell_id) REFERENCES cells(id)
     );
    
-    CREATE TABLE user_access (
+    CREATE TABLE IF NOT EXISTS user_access (
       user_id INTEGER,
       cell_id INTEGER,
       FOREIGN KEY(user_id) REFERENCES users(id),

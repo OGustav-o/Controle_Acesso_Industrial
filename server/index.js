@@ -7,6 +7,7 @@ import { v4 as uuidv4 } from 'uuid';
 import bcrypt from 'bcryptjs';
 import dotenv from 'dotenv';
 import { execFile } from 'child_process';
+import fs from 'fs';
 
 // Importação das funções do banco de dados e autenticação
 import { getDb, initializeDatabase, seedDatabase } from './db.js';
@@ -127,7 +128,14 @@ app.post('/api/auth/login', async (req, res) => {
 
 app.post('/api/users/register', uploadFace.single('photo'), async (req, res) => {
   try {
-    const { name } = req.body;
+    const name = req.body.name || req.body.username;
+
+    if (!name || name === 'undefined') {
+      // Limpa a foto caso o cadastro aborte
+      if (req.file) fs.unlink(req.file.path, () => {}); 
+      return res.status(400).json({ error: 'Nome do utilizador em falta no formulário.' });
+    }
+
     // Transforma a string recebida de volta num Array de IDs
     const targetDevices = JSON.parse(req.body.devices); 
     const photoFile = req.file;
@@ -136,8 +144,9 @@ app.post('/api/users/register', uploadFace.single('photo'), async (req, res) => 
     const imagePath = path.resolve(photoFile.path);
 
     // 1. Cria o utilizador no BD (Já não tem cell_id fixo aqui)
-    const stmt = db.prepare('INSERT INTO users (name, created_at) VALUES (?, CURRENT_TIMESTAMP)');
-    const info = stmt.run(name);
+    const defaultPassword = bcrypt.hashSync('123456', 10);
+    const stmt = db.prepare('INSERT INTO users (username, password_hash, created_at) VALUES (?, ?, CURRENT_TIMESTAMP)');
+    const info = stmt.run(name, defaultPassword);
     const newUserId = info.lastInsertRowid;
 
     console.log(`[Cadastro] Sincronizando usuário ${name} com ${targetDevices.length} dispositivos...`);
@@ -164,7 +173,19 @@ app.post('/api/users/register', uploadFace.single('photo'), async (req, res) => 
 
         // 2.2 Dispara o Python para este dispositivo específico
         execFile('python', args, (error, stdout, stderr) => {
-          if (error) return reject(`Falha no dispositivo ${device.name}: ${stderr || error.message}`);
+          if (error) {
+            // Extrai o erro real devolvido pelo script Python
+            let erroReal = stderr || error.message;
+            if (stdout) {
+               try {
+                  const pythonLog = JSON.parse(stdout);
+                  if (pythonLog.error) erroReal = pythonLog.error;
+               } catch(e) {
+                  erroReal = stdout.trim();
+               }
+            }
+            return reject(`[Python/Intelbras] ${erroReal}`);
+          }
           resolve(`Sucesso no dispositivo ${device.name}`);
         });
       });
@@ -176,14 +197,17 @@ app.post('/api/users/register', uploadFace.single('photo'), async (req, res) => 
     // 4. Limpa a foto temporária do servidor
     fs.unlink(imagePath, () => {});
 
-    // 5. Analisa os resultados (se algum falhou, podemos avisar o front-end)
+    // 5. Analisa os resultados
     const falhas = results.filter(r => r.status === 'rejected');
     
     if (falhas.length === 0) {
       res.json({ success: true, message: 'Usuário cadastrado em todas as máquinas com sucesso!' });
     } else {
+      // ESTA LINHA VAI MOSTRAR O ERRO REAL NO TERMINAL:
+      console.error('\n[🚨 FALHAS NA SINCRONIZAÇÃO]:', falhas.map(f => f.reason));
+      
       res.json({ 
-        success: true, // Ainda é "sucesso" porque guardou no BD, mas com ressalvas
+        success: true, 
         message: `Cadastrado, mas falhou em ${falhas.length} dispositivos. Verifique a conexão das máquinas.` 
       });
     }
@@ -249,6 +273,32 @@ app.post('/api/users', upload.single('photo'), async (req, res) => {
   }
 });
 
+app.delete('/api/users/:id', (req, res) => {
+  try {
+    const db = getDb();
+    // Removemos os rastos do utilizador noutras tabelas para evitar erros de Foreign Key
+    db.prepare('DELETE FROM user_access WHERE user_id = ?').run(req.params.id);
+    db.prepare('DELETE FROM access_events WHERE user_id = ?').run(req.params.id);
+    db.prepare('DELETE FROM cell_presence WHERE user_id = ?').run(req.params.id);
+    db.prepare('DELETE FROM users WHERE id = ?').run(req.params.id);
+    res.json({ success: true, message: 'Usuário deletado do painel com sucesso!' });
+  } catch (err) {
+    res.status(500).json({ error: 'Erro ao deletar usuário.' });
+  }
+});
+
+app.put('/api/users/:id', (req, res) => {
+  try {
+    const db = getDb();
+    const { username, role } = req.body; // Atualizamos apenas dados textuais
+    db.prepare('UPDATE users SET username = ?, role = ? WHERE id = ?')
+      .run(username, role || 'operator', req.params.id);
+    res.json({ success: true, message: 'Usuário atualizado!' });
+  } catch (err) {
+    res.status(500).json({ error: 'Erro ao atualizar usuário.' });
+  }
+});
+
 // --- ROTAS DE CÉLULAS (CELLS) ---
 
 app.get('/api/cells', (req, res) => {
@@ -288,6 +338,29 @@ app.post('/api/cells', (req, res) => {
   } catch (error) {
     console.error('[Cells] Create failed:', error);
     res.status(500).json({ error: 'Erro ao criar célula' });
+  }
+});
+
+app.delete('/api/cells/:id', (req, res) => {
+  try {
+    const db = getDb();
+    db.prepare('DELETE FROM user_access WHERE cell_id = ?').run(req.params.id);
+    db.prepare('DELETE FROM cells WHERE id = ?').run(req.params.id);
+    res.json({ success: true, message: 'Célula deletada com sucesso!' });
+  } catch (err) {
+    res.status(500).json({ error: 'Erro: Remova os dispositivos desta célula primeiro.' });
+  }
+});
+
+app.put('/api/cells/:id', (req, res) => {
+  try {
+    const db = getDb();
+    const { name, description, plc_address, plc_port, plc_rack, plc_slot, plc_database, plc_start_byte } = req.body;
+    db.prepare(`UPDATE cells SET name=?, description=?, plc_address=?, plc_port=?, plc_rack=?, plc_slot=?, plc_database=?, plc_start_byte=? WHERE id=?`)
+      .run(name, description, plc_address, plc_port, plc_rack, plc_slot, plc_database, plc_start_byte, req.params.id);
+    res.json({ success: true, message: 'Célula atualizada!' });
+  } catch (err) {
+    res.status(500).json({ error: 'Erro ao atualizar célula.' });
   }
 });
 
@@ -418,20 +491,48 @@ app.post('/api/intelbras-devices', (req, res) => {
 
 app.delete('/api/intelbras-devices/:id', (req, res) => {
   try {
-    const user = authenticateRequest(req);
-    if (!user || user.role !== 'admin') {
-      return res.status(403).json({ error: 'Acesso negado' });
-    }
-
-    const { id } = req.params;
-    const db = getDb();
-    
-    db.prepare('DELETE FROM intelbras_devices WHERE id = ?').run(id);
-    res.json({ success: true });
-  } catch (error) {
-    console.error('[Devices] Delete failed:', error);
-    res.status(500).json({ error: 'Erro ao deletar dispositivo' });
+    getDb().prepare('DELETE FROM intelbras_devices WHERE id = ?').run(req.params.id);
+    res.json({ success: true, message: 'Dispositivo deletado com sucesso!' });
+  } catch (err) {
+    res.status(500).json({ error: 'Erro ao deletar dispositivo.' });
   }
+});
+
+app.put('/api/intelbras-devices/:id', (req, res) => {
+  try {
+    const db = getDb();
+    // Mapeia os dados recebidos do frontend para as colunas do SQLite
+    const { name, ipAddress, port, username, password, cell_id } = req.body;
+    db.prepare(`UPDATE intelbras_devices SET name=?, ip_address=?, port=?, username=?, password=?, cell_id=? WHERE id=?`)
+      .run(name, ipAddress, port, username, password, cell_id, req.params.id);
+    res.json({ success: true, message: 'Dispositivo atualizado!' });
+  } catch (err) {
+    res.status(500).json({ error: 'Erro ao atualizar dispositivo.' });
+  }
+});
+
+// DELETE: Remover itens
+app.delete('/api/users/:id', (req, res) => {
+    getDb().prepare('DELETE FROM users WHERE id = ?').run(req.params.id);
+    res.json({ success: true, message: 'Usuário removido' });
+});
+
+app.delete('/api/cells/:id', (req, res) => {
+    getDb().prepare('DELETE FROM cells WHERE id = ?').run(req.params.id);
+    res.json({ success: true, message: 'Célula removida' });
+});
+
+app.delete('/api/intelbras-devices/:id', (req, res) => {
+    getDb().prepare('DELETE FROM intelbras_devices WHERE id = ?').run(req.params.id);
+    res.json({ success: true, message: 'Dispositivo removido' });
+});
+
+// PUT: Atualizar itens (Exemplo para Células)
+app.put('/api/cells/:id', (req, res) => {
+    const { name, description, plc_address, plc_port, plc_rack, plc_slot, plc_database, plc_start_byte } = req.body;
+    getDb().prepare(`UPDATE cells SET name=?, description=?, plc_address=?, plc_port=?, plc_rack=?, plc_slot=?, plc_database=?, plc_start_byte=? WHERE id=?`)
+      .run(name, description, plc_address, plc_port, plc_rack, plc_slot, plc_database, plc_start_byte, req.params.id);
+    res.json({ success: true, message: 'Célula atualizada!' });
 });
 
 // --- INTEGRAÇÃO COM CLP (BRIDGE) ---
