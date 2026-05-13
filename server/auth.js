@@ -1,8 +1,9 @@
-import bcrypt from 'bcryptjs';
-import jwt from 'jsonwebtoken';
-import { getDb } from './db.js';
+import bcrypt from "bcryptjs";
+import jwt from "jsonwebtoken";
+import { getDb } from "./db.js";
 
-const JWT_SECRET = process.env.JWT_SECRET || 'default-secret-key-change-in-production';
+const JWT_SECRET =
+  process.env.JWT_SECRET || "default-secret-key-change-in-production";
 
 export function hashPassword(password) {
   return bcrypt.hashSync(password, 10);
@@ -21,7 +22,7 @@ export function createToken(user) {
       role: user.role,
     },
     JWT_SECRET,
-    { expiresIn: '24h' }
+    { expiresIn: "24h" },
   );
 }
 
@@ -35,15 +36,17 @@ export function verifyToken(token) {
 
 export function extractTokenFromRequest(req) {
   const authHeader = req.headers.authorization;
-  if (authHeader && authHeader.startsWith('Bearer ')) {
+  if (authHeader && authHeader.startsWith("Bearer ")) {
     return authHeader.substring(7);
   }
 
   const cookies = req.headers.cookie;
   if (cookies) {
-    const tokenCookie = cookies.split(';').find(c => c.trim().startsWith('token='));
+    const tokenCookie = cookies
+      .split(";")
+      .find((c) => c.trim().startsWith("token="));
     if (tokenCookie) {
-      return tokenCookie.split('=')[1];
+      return tokenCookie.split("=")[1];
     }
   }
 
@@ -53,30 +56,32 @@ export function extractTokenFromRequest(req) {
 export function authenticateRequest(req) {
   const token = extractTokenFromRequest(req);
   if (!token) {
-    throw new Error('Unauthorized');
+    throw new Error("Unauthorized");
   }
 
   const user = verifyToken(token);
   if (!user) {
-    throw new Error('Unauthorized');
+    throw new Error("Unauthorized");
   }
-  
+
   return user;
 }
 
 export function login(username, password) {
   const db = getDb();
 
-  const user = db.prepare('SELECT * FROM users WHERE username = ?').get(username);
+  const user = db
+    .prepare("SELECT * FROM users WHERE username = ?")
+    .get(username);
 
   if (!user) {
-    throw new Error('Invalid username or password');
+    throw new Error("Invalid username or password");
   }
 
   const passwordMatch = verifyPassword(password, user.password_hash);
 
   if (!passwordMatch) {
-    throw new Error('Invalid username or password');
+    throw new Error("Invalid username or password");
   }
 
   const token = createToken(user);
@@ -93,20 +98,24 @@ export function login(username, password) {
   };
 }
 
-export function createUser(username, email, password, role = 'user') {
+export function createUser(username, email, password, role = "user") {
   const db = getDb();
 
-  const existingUser = db.prepare('SELECT * FROM users WHERE username = ?').get(username);
+  const existingUser = db
+    .prepare("SELECT * FROM users WHERE username = ?")
+    .get(username);
 
   if (existingUser) {
-    throw new Error('Username already exists');
+    throw new Error("Username already exists");
   }
 
   const passwordHash = hashPassword(password);
 
-  const result = db.prepare(
-    'INSERT INTO users (username, email, password_hash, role) VALUES (?, ?, ?, ?)'
-  ).run(username, email, passwordHash, role);
+  const result = db
+    .prepare(
+      "INSERT INTO users (username, email, password_hash, role) VALUES (?, ?, ?, ?)",
+    )
+    .run(username, email, passwordHash, role);
 
   return {
     id: result.lastInsertRowid,
