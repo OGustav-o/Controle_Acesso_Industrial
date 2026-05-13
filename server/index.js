@@ -8,6 +8,8 @@ import bcrypt from 'bcryptjs';
 import dotenv from 'dotenv';
 import { execFile } from 'child_process';
 import fs from 'fs';
+import { createServer } from 'http';
+import { Server } from 'socket.io';
 
 // Importação das funções do banco de dados e autenticação
 import { getDb, initializeDatabase, seedDatabase } from './db.js';
@@ -17,6 +19,13 @@ import { login, authenticateRequest } from './auth.js';
 dotenv.config();
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const app = express();
+const httpServer = createServer(app);
+const io = new Server(httpServer);
+
+io.on('connection', (socket) => {
+    console.log('🟢 [WebSockets] Um painel web (Navegador) conectou-se ao tempo real!');
+});
+
 const port = process.env.PORT || 3000;
 const upload = multer();
 const uploadFace = multer({ dest: 'uploads/' });
@@ -26,6 +35,7 @@ initializeDatabase();
 seedDatabase();
 
 // Middleware
+app.set('io', io);
 app.use(cors());
 app.use(express.json());
 app.use(express.static(path.join(__dirname, '../public')));
@@ -364,6 +374,88 @@ app.put('/api/cells/:id', (req, res) => {
   }
 });
 
+// =========================================================
+// ROTAS DE PERMISSÕES (user_access)
+// =========================================================
+
+// Listar todas as permissões ativas
+app.get('/api/permissions', (req, res) => {
+  try {
+    const db = getDb();
+    const rows = db.prepare(`
+      SELECT ua.user_id, u.username, ua.cell_id, c.name as cell_name 
+      FROM user_access ua
+      JOIN users u ON ua.user_id = u.id
+      JOIN cells c ON ua.cell_id = c.id
+    `).all();
+    res.json(rows);
+  } catch (err) {
+    res.status(500).json({ error: 'Erro ao buscar permissões.' });
+  }
+});
+
+// Conceder nova permissão (Vincular Usuário à Célula)
+app.post('/api/permissions', (req, res) => {
+  try {
+    const { user_id, cell_id } = req.body;
+    if (!user_id || !cell_id) return res.status(400).json({ error: 'Usuário e Célula são obrigatórios.' });
+
+    const db = getDb();
+    db.prepare('INSERT OR IGNORE INTO user_access (user_id, cell_id) VALUES (?, ?)').run(user_id, cell_id);
+    
+    res.json({ success: true, message: 'Permissão concedida com sucesso!' });
+  } catch (err) {
+    res.status(500).json({ error: 'Erro ao conceder permissão.' });
+  }
+});
+
+// Revogar permissão (Desvincular)
+app.delete('/api/permissions/:userId/:cellId', async (req, res) => {
+  try {
+    const { userId, cellId } = req.params;
+    const db = getDb();
+    
+    // 1. Busca os dados para comunicar com a máquina
+    const user = db.prepare('SELECT username FROM users WHERE id = ?').get(userId);
+    const devices = db.prepare('SELECT * FROM intelbras_devices WHERE cell_id = ?').all(cellId);
+
+    if (!user) return res.status(404).json({ error: 'Usuário não encontrado.' });
+
+    // 2. Remove o vínculo lógico no banco de dados web
+    db.prepare('DELETE FROM user_access WHERE user_id = ? AND cell_id = ?').run(userId, cellId);
+
+    // 3. Executa o bloqueio em todos os dispositivos daquela célula (Mantém a face, corta o acesso)
+    const scriptPath = path.join(__dirname, 'API', 'toggle_user.py');
+    
+    devices.forEach(device => {
+      const args = [
+        scriptPath,
+        '--ip', device.ip_address,
+        '--user', device.username,
+        '--password', device.password,
+        '--userid', userId.toString(),
+        '--name', user.username,
+        '--action', 'block' // <-- A MÁGICA ACONTECE AQUI
+      ];
+
+      execFile('python', args, (error, stdout, stderr) => {
+        if (error) {
+          console.error(`[Hardware Block Failed] ${device.name}:`, stderr || error.message);
+        } else {
+          console.log(`[Hardware Block Success] Usuário ${user.username} bloqueado em ${device.name}`);
+        }
+      });
+    });
+
+    // 4. Responde imediatamente ao painel web para não travar a UI
+    res.json({ success: true, message: 'Permissão revogada e bloqueio enviado aos equipamentos!' });
+
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'Erro ao revogar permissão.' });
+  }
+});
+
 // --- ROTAS DE EVENTOS E PRESENÇA ---
 
 app.get('/api/events', (req, res) => {
@@ -387,67 +479,142 @@ app.get('/api/events', (req, res) => {
 
 // --- ROTA PARA RECEBER EVENTOS DIRETOS DA INTELBRAS (MODO PUSH) ---
 // --- SERVIDOR DE EVENTOS PADRÃO INTELBRAS (MODO PUSH / AUTO CGI) ---
-app.post('/api/access-events', async (req, res) => {
-  const deviceIp = req.ip.replace('::ffff:', '');
-  const payload = req.body;
+// =========================================================
+// O "OUVIDO" DO SERVIDOR: RECEÇÃO DE EVENTOS (COM ANTI-SPAM E TOGGLE)
+// =========================================================
 
-  // 1. Tratamento de Heartbeat (Manter Conexão Viva)
-  // O equipamento envia "Code": "Heartbeat" periodicamente.
-  if (payload.Code === 'Heartbeat') {
-    return res.status(200).json({ status: "ok" });
-  }
+// Escudo para evitar o "tiro duplo" da máquina
+const antiSpamCache = new Set();
 
-  // 2. Verificação do Código de Evento
-  // A Intelbras identifica acesso facial como "AccessControl"
-  if (payload.Code !== 'AccessControl') {
-    console.log(`[Rede] Notificação ignorada (Código: ${payload.Code}) de ${deviceIp}`);
-    return res.status(200).send(); 
-  }
+app.post('/api/access-events', (req, res) => {
+  let rawData = '';
 
+  req.on('data', chunk => { rawData += chunk.toString(); });
+
+  req.on('end', () => {
+    try {
+      const db = getDb();
+      const ipDispositivo = req.ip.replace('::ffff:', ''); 
+      const device = db.prepare('SELECT id, name, cell_id FROM intelbras_devices WHERE ip_address = ?').get(ipDispositivo);
+
+      if (!device) return res.status(403).json({ error: 'Dispositivo não reconhecido' });
+
+      // Extrai o ID e converte obrigatoriamente para NÚMERO
+      const match = rawData.match(/"UserID"\s*:\s*"([^"]+)"/i) || rawData.match(/"UserId"\s*:\s*"([^"]+)"/i);
+      let rawUserId = match ? match[1].trim() : null;
+
+      if (!rawUserId) return res.status(200).json({ auth: false, message: 'Evento de sistema ignorado' });
+
+      const userId = parseInt(rawUserId, 10); 
+
+      // 🛡️ ESCUDO ANTI-SPAM: Impede que a máquina faça múltiplas leituras em 3 segundos
+      const spamKey = `${userId}-${device.cell_id}`;
+      if (antiSpamCache.has(spamKey)) {
+          return res.status(200).json({ auth: true, message: 'Ignorado pelo Anti-Spam' });
+      }
+      antiSpamCache.add(spamKey);
+      setTimeout(() => antiSpamCache.delete(spamKey), 3000); // Esquece a trava ao fim de 3 segundos
+
+      // Validação de Utilizador e Permissão
+      const user = db.prepare('SELECT * FROM users WHERE id = ?').get(userId);
+      if (!user) return res.status(404).json({ error: 'Usuário inexistente' });
+
+      const temPermissao = db.prepare('SELECT 1 FROM user_access WHERE user_id = ? AND cell_id = ?').get(userId, device.cell_id);
+      if (!temPermissao) {
+          db.prepare('INSERT INTO access_events (user_id, cell_id, event_type, status, source) VALUES (?, ?, ?, ?, ?)')
+            .run(userId, device.cell_id, 'entry', 'failed', 'intelbras');
+          if (req.app.get('io')) req.app.get('io').emit('update_dashboard');
+          return res.status(403).json({ error: 'Acesso negado' });
+      }
+
+      // 🔄 LÓGICA DE ALTERNÂNCIA (ENTRADA / SAÍDA)
+      const isInside = db.prepare('SELECT 1 FROM cell_presence WHERE user_id = ? AND cell_id = ?').get(userId, device.cell_id);
+
+      if (isInside) {
+          // SE JÁ ESTÁ DENTRO: MARCA SAÍDA
+          db.prepare('INSERT INTO access_events (user_id, cell_id, event_type, status, source) VALUES (?, ?, ?, ?, ?)')
+            .run(userId, device.cell_id, 'exit', 'success', 'intelbras');
+
+          db.prepare('DELETE FROM cell_presence WHERE user_id = ? AND cell_id = ?')
+            .run(userId, device.cell_id);
+
+          console.log(`[Automação] 🚪 ${user.username} marcou SAÍDA da célula ${device.cell_id}.`);
+      } else {
+          // SE NÃO ESTÁ DENTRO: MARCA ENTRADA
+          db.prepare('INSERT INTO access_events (user_id, cell_id, event_type, status, source) VALUES (?, ?, ?, ?, ?)')
+            .run(userId, device.cell_id, 'entry', 'success', 'intelbras');
+
+          db.prepare('INSERT INTO cell_presence (user_id, cell_id, entry_time) VALUES (?, ?, CURRENT_TIMESTAMP)')
+            .run(userId, device.cell_id);
+
+          console.log(`[Automação] 🚪 ${user.username} marcou ENTRADA na célula ${device.cell_id}.`);
+      }
+
+      // Atualiza a interface gráfica via WebSockets
+      if (req.app.get('io')) req.app.get('io').emit('update_dashboard');
+
+      // =========================================================
+      // 🚀 O CASAMENTO COM O CLP (Lógica de Intertravamento)
+      // =========================================================
+      const celula = db.prepare('SELECT * FROM cells WHERE id = ?').get(device.cell_id);
+      
+      if (celula && celula.plc_address) {
+          // Conta quantas pessoas estão dentro da célula NESTE EXATO MOMENTO
+          const checkPresence = db.prepare('SELECT COUNT(*) as total FROM cell_presence WHERE cell_id = ?').get(device.cell_id);
+          const pessoasDentro = checkPresence.total;
+
+          // Se houver alguém dentro (1 ou mais), envia 1. Se estiver vazia (0), envia 0.
+          const valorClp = pessoasDentro > 0 ? 1 : 0;
+
+          console.log(`[Automação] 📊 Pessoas na Célula ${celula.name}: ${pessoasDentro}. Enviando valor ${valorClp} para o CLP...`);
+
+          if (typeof runPlcCommand === 'function') {
+              runPlcCommand(celula, 'write', valorClp).catch(err => {
+                  console.error(`[Automação] ⚠️ CLP indisponível: ${err}`);
+              });
+          }
+      }
+
+      res.json({ auth: true, success: true, message: 'Processado' });
+
+    } catch (error) {
+      console.error('[Access Events Fatal Error]:', error);
+      res.status(500).json({ error: 'Erro ao processar' });
+    }
+  });
+});
+app.get('/api/access-events', (req, res) => {
   try {
     const db = getDb();
-    
-    // 3. Extração de Dados do Padrão Intelbras
-    // No padrão oficial, os detalhes ficam dentro do objeto "Data"
-    const eventData = payload.Data || {};
-    const userId = eventData.UserID || eventData.CardNo;
-    const eventType = eventData.Method === 1 ? 'entry' : 'exit'; // Exemplo: 1 para entrada
+    const events = db.prepare(`
+      SELECT ae.*, u.username, c.name as cell_name 
+      FROM access_events ae
+      LEFT JOIN users u ON ae.user_id = u.id
+      LEFT JOIN cells c ON ae.cell_id = c.id
+      ORDER BY ae.timestamp DESC LIMIT 50
+    `).all();
+    res.json(events);
+  } catch (err) {
+    res.status(500).json({ error: 'Erro ao buscar histórico de eventos.' });
+  }
+});
 
-    // 4. Localização do Dispositivo no Banco
-    const device = db.prepare('SELECT * FROM intelbras_devices WHERE ip_address = ?').get(deviceIp);
-
-    if (!device) {
-      console.warn(`[Acesso] Dispositivo não reconhecido. IP: ${deviceIp}`);
-      return res.status(404).send();
-    }
-
-    if (userId) {
-      console.log(`\n[INTELBRAS] 👤 Identificado: UserID ${userId} em ${device.name}`);
-      
-      // 5. Registo de Log
-      db.prepare(`
-        INSERT INTO access_events (user_id, cell_id, event_type, source, status)
-        VALUES (?, ?, ?, 'intelbras', 'success')
-      `).run(userId, device.cell_id, eventType);
-
-      // 6. Comando para o CLP Siemens
-      const cell = db.prepare('SELECT * FROM cells WHERE id = ?').get(device.cell_id);
-      if (cell && cell.plc_database) {
-        console.log(`[Automação] ⚙️ Enviando comando de abertura para CLP: ${cell.name}`);
-        await runPlcCommand(cell, 'write', 1);
-
-        setTimeout(() => {
-          runPlcCommand(cell, 'write', 0).catch(() => {});
-        }, 2000);
-      }
-    }
-
-    // Resposta padrão 200 OK exigida pelo hardware para confirmar receção
-    res.status(200).send();
-
-  } catch (error) {
-    console.error('[Intelbras Event Error]:', error);
-    res.status(500).send();
+// =========================================================
+// ROTA PARA O DASHBOARD LER A PRESENÇA EM TEMPO REAL
+// =========================================================
+app.get('/api/cell-presence', (req, res) => {
+  try {
+    const db = getDb();
+    const presence = db.prepare(`
+      SELECT cp.*, u.username, c.name as cell_name 
+      FROM cell_presence cp
+      LEFT JOIN users u ON cp.user_id = u.id
+      LEFT JOIN cells c ON cp.cell_id = c.id
+      ORDER BY cp.entry_time DESC
+    `).all();
+    res.json(presence);
+  } catch (err) {
+    res.status(500).json({ error: 'Erro ao buscar dados de presença.' });
   }
 });
 
@@ -698,8 +865,8 @@ app.post('/api/cells/:id/test', async (req, res) => {
 // Inicialização do Servidor
 
 const PORT = 3000;
-app.listen(PORT, '0.0.0.0', () => {
-  console.log(`Servidor aberto para a rede na porta ${PORT}`);
+httpServer.listen(PORT, '0.0.0.0', () => {
+  console.log(`✅ Servidor Web e WebSockets rodando em http://localhost:${PORT} (Rede Externa Liberada)`);
 });
 /*app.listen(port, () => {
   console.log(`

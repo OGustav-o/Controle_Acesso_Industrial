@@ -48,6 +48,7 @@ function switchPage(page, event) {
     else if (page === 'cells') updateCellsGrid();
     else if (page === 'devices') updateDevicesGrid();
     else if (page === 'events' || page === 'presence') loadDashboardData();
+    else if (page === 'permissions') updatePermissionsTab();
 }
 
 // ==========================================
@@ -490,4 +491,84 @@ if (userPhotoInput) {
         }
         reader.readAsDataURL(this.files[0]);
     });
+}
+// ==========================================
+// ABA DE PERMISSÕES DINÂMICAS
+// ==========================================
+
+async function updatePermissionsTab() {
+    try {
+        // Busca os dados simultaneamente
+        const [permissions, users, cells] = await Promise.all([
+            ApiClient.get('/permissions'),
+            ApiClient.get('/users'),
+            ApiClient.get('/cells')
+        ]);
+
+        // Atualiza os selects do formulário
+        const userSelect = document.getElementById('permUserId');
+        const cellSelect = document.getElementById('permCellId');
+        
+        if (userSelect && cellSelect) {
+            userSelect.innerHTML = '<option value="">Selecione um Usuário...</option>' + 
+                users.map(u => `<option value="${u.id}">${u.username}</option>`).join('');
+                
+            cellSelect.innerHTML = '<option value="">Selecione uma Célula...</option>' + 
+                cells.map(c => `<option value="${c.id}">${c.name}</option>`).join('');
+        }
+
+        // Atualiza a tabela
+        const tbody = document.querySelector('#permissionsTable tbody');
+        if (tbody) {
+            if (permissions.length === 0) {
+                tbody.innerHTML = '<tr><td colspan="3" style="text-align: center;">Nenhuma permissão cadastrada</td></tr>';
+                return;
+            }
+
+            tbody.innerHTML = permissions.map(p => `
+                <tr>
+                    <td><strong>${p.username}</strong></td>
+                    <td><span class="badge badge-primary">${p.cell_name}</span></td>
+                    <td>
+                        <button class="btn btn-sm btn-danger" onclick="revokePermission(${p.user_id}, ${p.cell_id})">
+                            ❌ Revogar
+                        </button>
+                    </td>
+                </tr>
+            `).join('');
+        }
+    } catch (error) {
+        console.error("Erro ao carregar permissões:", error);
+    }
+}
+
+// Evento para conceder permissão
+const permForm = document.getElementById('grantPermissionForm');
+if (permForm) {
+    permForm.addEventListener('submit', async (e) => {
+        e.preventDefault();
+        const user_id = document.getElementById('permUserId').value;
+        const cell_id = document.getElementById('permCellId').value;
+
+        try {
+            await ApiClient.post('/permissions', { user_id, cell_id });
+            showAlert('✅ Permissão concedida!', 'success');
+            updatePermissionsTab(); // Atualiza a tabela imediatamente
+        } catch (error) {
+            showAlert('❌ ' + error.message, 'danger');
+        }
+    });
+}
+
+// Função para revogar permissão
+async function revokePermission(userId, cellId) {
+    if (confirm('Tem certeza que deseja revogar o acesso deste usuário a esta célula?')) {
+        try {
+            await ApiClient.delete(`/permissions/${userId}/${cellId}`);
+            showAlert('✅ Permissão revogada!', 'success');
+            updatePermissionsTab(); // Atualiza a tabela
+        } catch (error) {
+            showAlert('❌ ' + error.message, 'danger');
+        }
+    }
 }

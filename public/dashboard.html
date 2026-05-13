@@ -390,12 +390,41 @@
 
                 <!-- Permissions Page -->
                 <div id="permissions" class="page-section">
-                    <h2>Gerenciar Permissões</h2>
-                    <div class="card">
+                    <div class="d-flex justify-content-between align-items-center mb-4">
+                        <h2>🔑 Gerenciamento de Permissões</h2>
+                    </div>
+
+                    <div class="card mb-4">
+                        <div class="card-header"><h3>Conceder Novo Acesso</h3></div>
                         <div class="card-body">
-                            <p style="color: var(--text-light); text-align: center; padding: 2rem;">
-                                Funcionalidade em desenvolvimento...
-                            </p>
+                            <form id="grantPermissionForm" style="display: flex; gap: 1rem; align-items: flex-end;">
+                                <div style="flex: 1;">
+                                    <label>Usuário:</label>
+                                    <select id="permUserId" class="form-control" required></select>
+                                </div>
+                                <div style="flex: 1;">
+                                    <label>Célula de Destino:</label>
+                                    <select id="permCellId" class="form-control" required></select>
+                                </div>
+                                <button type="submit" class="btn btn-success">Vincular Acesso</button>
+                            </form>
+                        </div>
+                    </div>
+
+                    <div class="card">
+                        <div class="card-header"><h3>Acessos Ativos</h3></div>
+                        <div class="card-body" style="padding: 0;">
+                            <table id="permissionsTable" class="table">
+                                <thead>
+                                    <tr>
+                                        <th>Usuário</th>
+                                        <th>Célula Autorizada</th>
+                                        <th>Ações</th>
+                                    </tr>
+                                </thead>
+                                <tbody>
+                                    </tbody>
+                            </table>
                         </div>
                     </div>
                 </div>
@@ -414,10 +443,14 @@
 
                 <!-- Events Page -->
                 <div id="events" class="page-section">
-                    <h2>Histórico de Eventos</h2>
+                    <div class="d-flex justify-content-between align-items-center mb-4">
+                        <h2>📋 Histórico de Eventos</h2>
+                        <button class="btn btn-primary" onclick="loadDashboardData()">🔄 Atualizar</button>
+                    </div>
+
                     <div class="card">
-                        <div class="card-body">
-                            <table id="eventsTable">
+                        <div class="card-body" style="padding: 0;">
+                            <table id="eventsTable" class="table">
                                 <thead>
                                     <tr>
                                         <th>Usuário</th>
@@ -428,8 +461,7 @@
                                     </tr>
                                 </thead>
                                 <tbody>
-                                    <tr><td colspan="5" style="text-align: center; color: var(--text-light);">Carregando...</td></tr>
-                                </tbody>
+                                    </tbody>
                             </table>
                         </div>
                     </div>
@@ -437,21 +469,24 @@
 
                 <!-- Presence Page -->
                 <div id="presence" class="page-section">
-                    <h2>Presença em Células</h2>
+                    <div class="d-flex justify-content-between align-items-center mb-4">
+                        <h2>👤 Presença em Tempo Real</h2>
+                        <button class="btn btn-primary" onclick="loadDashboardData()">🔄 Atualizar</button>
+                    </div>
+
                     <div class="card">
-                        <div class="card-body">
-                            <table id="presenceTable">
+                        <div class="card-body" style="padding: 0;">
+                            <table id="presenceTable" class="table">
                                 <thead>
                                     <tr>
                                         <th>Usuário</th>
                                         <th>Célula</th>
-                                        <th>Entrada</th>
+                                        <th>Hora de Entrada</th>
                                         <th>Status</th>
                                     </tr>
                                 </thead>
                                 <tbody>
-                                    <tr><td colspan="4" style="text-align: center; color: var(--text-light);">Carregando...</td></tr>
-                                </tbody>
+                                    </tbody>
                             </table>
                         </div>
                     </div>
@@ -605,6 +640,25 @@
     </div>
 
     <script src="/js/app.js"></script>
-    <script src="/js/dashboard.js"></script>
+    <script src="/socket.io/socket.io.js"></script>
+    <script>
+        try {
+            const socket = io();
+            
+            socket.on('connect', () => {
+                console.log('🟢 [WebSockets] Conectado com sucesso ao Servidor!');
+            });
+
+            socket.on('update_dashboard', () => {
+                console.log('🔄 SINAL RECEBIDO! A máquina mandou atualizar a tela!');
+                if (typeof loadDashboardData === 'function') {
+                    loadDashboardData(); // Manda a sua tabela atualizar
+                }
+            });
+        } catch (err) {
+            console.error('❌ Erro ao iniciar WebSockets:', err);
+        }
+    </script>
+    <script src="js/dashboard.js"></script>
 </body>
 </html>
